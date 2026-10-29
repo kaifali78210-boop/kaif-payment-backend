@@ -1,3 +1,4 @@
+
 const express = require("express");
 const cors = require("cors");
 const Razorpay = require("razorpay");
@@ -9,85 +10,67 @@ app.use(cors({
   origin: "https://kaifali78210-boop.github.io"
 }));
 
-app.use(express.json());
+app.use(express.json({ limit: "20kb" }));
 
-if (!process.env.RAZORPAY_KEY_ID ||
-    !process.env.RAZORPAY_KEY_SECRET) {
+const keyId = process.env.RAZORPAY_KEY_ID;
+const keySecret = process.env.RAZORPAY_KEY_SECRET;
+
+if (!keyId || !keySecret) {
   throw new Error("Razorpay environment variables are missing");
 }
 
 const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_KEY_SECRET
+  key_id: keyId,
+  key_secret: keySecret
 });
 
-// Products and prices (amount in paise)
-const PRODUCTS = {
-  product1: {
-    name: "Product 1",
-    price: 49900
-  },
-  product2: {
-    name: "Product 2",
-    price: 99900
-  }
-};
-
-// Backend health check
 app.get("/", (req, res) => {
   res.send("Kaif Payment Backend Running!");
 });
 
-// Create payment order
+// Create an order. Amount is in paise.
+// This endpoint creates a payment order only; it does not credit a wallet.
 app.post("/create-order", async (req, res) => {
   try {
-    const { productId, quantity = 1 } = req.body || {};
-    const product = PRODUCTS[productId];
-
-    if (!product) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid product"
-      });
-    }
+    const amount = Number(req.body?.amount);
 
     if (
-      !Number.isInteger(quantity) ||
-      quantity < 1 ||
-      quantity > 10
+      !Number.isSafeInteger(amount) ||
+      amount < 100 ||
+      amount > 10000000
     ) {
       return res.status(400).json({
         success: false,
-        message: "Invalid quantity"
+        error: "Invalid amount"
       });
     }
 
     const order = await razorpay.orders.create({
-      amount: product.price * quantity,
+      amount,
       currency: "INR",
-      receipt: "order_" + Date.now()
+      receipt: "rcpt_" + crypto.randomUUID()
     });
 
-    res.json({
+    return res.json({
       success: true,
+      id: order.id,
       orderId: order.id,
       amount: order.amount,
       currency: order.currency,
-      productName: product.name,
-      keyId: process.env.RAZORPAY_KEY_ID
+      keyId
     });
   } catch (error) {
     console.error("Order error:", error.message);
-
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: "Payment order create nahi hua"
+      error: "Order creation failed"
     });
   }
 });
 
-// Verify payment signature
-app.post("/verify-payment", (req, res) => {
+// Verify signature and check payment status/amount with Razorpay.
+// This endpoint does not credit a wallet.
+app.post("/verify-payment", async (req, res) => {
   try {
     const {
       razorpay_order_id,
@@ -96,57 +79,78 @@ app.post("/verify-payment", (req, res) => {
     } = req.body || {};
 
     if (
-      !razorpay_order_id ||
-      !razorpay_payment_id ||
-      !razorpay_signature
+      typeof razorpay_order_id !== "string" ||
+      typeof razorpay_payment_id !== "string" ||
+      typeof razorpay_signature !== "string"
     ) {
       return res.status(400).json({
         success: false,
-        message: "Payment details missing"
+        error: "Payment details missing"
       });
     }
 
     const expectedSignature = crypto
-      .createHmac(
-        "sha256",
-        process.env.RAZORPAY_KEY_SECRET
-      )
-      .update(
-        razorpay_order_id + "|" + razorpay_payment_id
-      )
-      .digest("hex");
+      .createHmac("sha256", keySecret)
+      .update(razorpay_order_id + "|" + razorpay_payment_id)
+      .digest();
 
-    const received = Buffer.from(razorpay_signature, "hex");
-    const expected = Buffer.from(expectedSignature, "hex");
+    let receivedSignature;
 
-    if (
-      received.length !== expected.length ||
-      !crypto.timingSafeEqual(received, expected)
-    ) {
+    try {
+      receivedSignature = Buffer.from(razorpay_signature, "hex");
+    } catch {
       return res.status(400).json({
         success: false,
-        message: "Payment verification failed"
+        error: "Invalid signature"
       });
     }
 
-    res.json({
+    if (
+      receivedSignature.length !== expectedSignature.length ||
+      !crypto.timingSafeEqual(receivedSignature, expectedSignature)
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: "Payment signature verification failed"
+      });
+    }
+
+    const [order, payment] = await Promise.all([
+      razorpay.orders.fetch(razorpay_order_id),
+      razorpay.payments.fetch(razorpay_payment_id)
+    ]);
+
+    if (
+      payment.order_id !== order.id ||
+      payment.amount !== order.amount ||
+      payment.currency !== order.currency ||
+      payment.status !== "captured"
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: "Payment is not captured or order details mismatch"
+      });
+    }
+
+    return res.json({
       success: true,
-      message: "Payment signature verified",
-      paymentId: razorpay_payment_id
+      message: "Payment verified and captured",
+      paymentId: payment.id,
+      orderId: order.id,
+      amount: payment.amount,
+      currency: payment.currency
     });
   } catch (error) {
     console.error("Verification error:", error.message);
-
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: "Payment verification error"
+      error: "Payment verification failed"
     });
   }
 });
 
-// Start server
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Kaif Payment Backend running on port ${PORT}`);
+  console.log("Kaif Payment Backend running on port " + PORT);
 });
