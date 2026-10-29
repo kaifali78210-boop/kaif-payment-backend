@@ -6,40 +6,42 @@ const crypto = require("crypto");
 const app = express();
 
 app.use(cors({
-  origin: [
-    "https://kaifali78210-boop.github.io"
-  ]
+  origin: "https://kaifali78210-boop.github.io"
 }));
 
 app.use(express.json());
+
+if (!process.env.RAZORPAY_KEY_ID ||
+    !process.env.RAZORPAY_KEY_SECRET) {
+  throw new Error("Razorpay environment variables are missing");
+}
 
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
   key_secret: process.env.RAZORPAY_KEY_SECRET
 });
 
-// Apne products aur unki prices yahan set karo
+// Products and prices (amount in paise)
 const PRODUCTS = {
-  "product1": {
+  product1: {
     name: "Product 1",
     price: 49900
   },
-  "product2": {
+  product2: {
     name: "Product 2",
     price: 99900
   }
 };
 
-// Backend check
+// Backend health check
 app.get("/", (req, res) => {
   res.send("Kaif Payment Backend Running!");
 });
 
-// Buy Now: Payment order create karo
+// Create payment order
 app.post("/create-order", async (req, res) => {
   try {
-    const { productId, quantity = 1 } = req.body;
-
+    const { productId, quantity = 1 } = req.body || {};
     const product = PRODUCTS[productId];
 
     if (!product) {
@@ -74,7 +76,6 @@ app.post("/create-order", async (req, res) => {
       productName: product.name,
       keyId: process.env.RAZORPAY_KEY_ID
     });
-
   } catch (error) {
     console.error("Order error:", error.message);
 
@@ -85,14 +86,14 @@ app.post("/create-order", async (req, res) => {
   }
 });
 
-// Payment signature verify karo
+// Verify payment signature
 app.post("/verify-payment", (req, res) => {
   try {
     const {
       razorpay_order_id,
       razorpay_payment_id,
       razorpay_signature
-    } = req.body;
+    } = req.body || {};
 
     if (
       !razorpay_order_id ||
@@ -115,8 +116,8 @@ app.post("/verify-payment", (req, res) => {
       )
       .digest("hex");
 
-    const received = Buffer.from(razorpay_signature);
-    const expected = Buffer.from(expectedSignature);
+    const received = Buffer.from(razorpay_signature, "hex");
+    const expected = Buffer.from(expectedSignature, "hex");
 
     if (
       received.length !== expected.length ||
@@ -131,4 +132,21 @@ app.post("/verify-payment", (req, res) => {
     res.json({
       success: true,
       message: "Payment signature verified",
-      payment
+      paymentId: razorpay_payment_id
+    });
+  } catch (error) {
+    console.error("Verification error:", error.message);
+
+    res.status(500).json({
+      success: false,
+      message: "Payment verification error"
+    });
+  }
+});
+
+// Start server
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Kaif Payment Backend running on port ${PORT}`);
+});
